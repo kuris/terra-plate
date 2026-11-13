@@ -400,8 +400,8 @@
         <div class="region-row">
           <select id="resSel" class="sel">
             <option value="96">빠름 · 96</option>
-            <option value="160" selected>보통 · 160</option>
-            <option value="224">정밀 · 224</option>
+            <option value="160">보통 · 160</option>
+            <option value="224" selected>정밀 · 224</option>
             <option value="320">초정밀 · 320</option>
           </select>
           <select id="vscaleSel" class="sel">
@@ -514,9 +514,9 @@ const searchResults = document.getElementById('searchResults');
 function flyToHit(hit){
   const lat=parseFloat(hit.lat), lon=parseFloat(hit.lon);
   const parts=hit.display_name.split(',').map(s=>s.trim()).filter(Boolean);
-  // 시야 가로폭이 약 5km가 되는 줌으로 이동 — 기본 캡처 영역 감
+  // 시야 가로폭이 약 2km가 되는 줌으로 이동 — 정밀한 기본 캡처 영역
   const wpx=map.getCanvas().clientWidth||window.innerWidth||1440;
-  const zoom=Math.min(17,Math.max(3,Math.log2(156543.03392*Math.cos(lat*Math.PI/180)*wpx/5000)));
+  const zoom=Math.min(17,Math.max(3,Math.log2(156543.03392*Math.cos(lat*Math.PI/180)*wpx/2000)));
   map.flyTo({ center:[lon,lat], zoom, pitch:+document.getElementById('pitchR').value, duration:3200, essential:true });
   setPlace(parts.length>1 ? `${parts[0]} ${parts[1]}` : parts[0]);
 }
