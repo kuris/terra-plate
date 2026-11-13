@@ -1049,9 +1049,9 @@ function sampleTexColor(texData,texW,texH,ringPx){
   return [r/n/255, g/n/255, bb/n/255];
 }
 function buildBuildingMesh(ways,hm,minE,vs,ctx){
-  const {Wm,Hm,midLat,b,texData,texW,texH}=ctx;
+  const {Wm,Hm,midLat,b,texture}=ctx;
   const mLng=111320*Math.cos(midLat*Math.PI/180), mLat=110540;
-  const pos=[],col=[];
+  const pos=[],col=[],uv=[];
   let made=0;
   for(const el of ways){
     const g=el.geometry; if(!g||g.length<4) continue;
@@ -1068,49 +1068,47 @@ function buildBuildingMesh(ways,hm,minE,vs,ctx){
     for(let i=0;i<ring.length-1;i++){ cx+=ring[i][0]; cy+=ring[i][1]; }
     cx/=ring.length-1; cy/=ring.length-1;
     const baseE=(sampleElev(hm,(cx-b.w)/(b.e-b.w),(cy-b.n)/(b.s-b.n))-minE)*vs;
-    const pts=[],ringPx=[];
+    const pts=[],ptUV=[];
     for(const p of ring){
       const x=(p[0]-b.w)*mLng-Wm/2, z=(p[1]-b.n)*mLat-Hm/2;
-      ringPx.push([(p[0]-b.w)/(b.e-b.w)*texW, (p[1]-b.n)/(b.s-b.n)*texH]);
       const last=pts[pts.length-1];
-      if(!last||Math.abs(last.x-x)>.01||Math.abs(last.y-z)>.01) pts.push(new THREE.Vector2(x,z));
-    }
-    if(pts.length<3) continue;
-    let tris=[];
-    try{ tris=THREE.ShapeUtils.triangulateShape(new THREE.Shape(pts),[]); }catch{ continue; }
-    // 실제 지도 색상 → 채도 +25%로 입체감, 실패 시 용도 팔레트
-    let base=sampleTexColor(texData,texW,texH,ringPx);
-    if(base){
-      const avg=(base[0]+base[1]+base[2])/3;
-      base=base.map(c=>Math.max(0,Math.min(1,avg+(c-avg)*1.25)));
-    }else{
-      base=fallbackColor(tags);
-    }
-    const j=0.94+Math.random()*0.12;                 // 건물별 미세 명도 변화
-    const roof=base.map(c=>c*j), wall=roof.map(c=>c*0.78);
-    for(const t of tris){                            // 지붕 (원색)
-      for(const idx of t){
-        const p=pts[idx];
-        pos.push(p.x,baseE+h,p.y); col.push(roof[0],roof[1],roof[2]);
+      if(!last||Math.abs(last.x-x)>.01||Math.abs(last.y-z)>.01){
+        pts.push(new THREE.Vector2(x,z));
+        ptUV.push([(p[0]-b.w)/(b.e-b.w), (p[1]-b.n)/(b.s-b.n)]);
       }
     }
-    for(let i=0;i<pts.length-1;i++){                 // 벽면 (22% 어둡게)
+    if(pts.length<3) continue;
+    const cfx=(cx-b.w)/(b.e-b.w), cfy=(cy-b.n)/(b.s-b.n);
+    const j=0.94+Math.random()*0.12;
+    let tris=[];
+    try{ tris=THREE.ShapeUtils.triangulateShape(new THREE.Shape(pts),[]); }catch{ continue; }
+    for(const t of tris){   // 지붕: 실제 위성 영상을 그대로 UV 매핑
+      for(const idx of t){
+        const p=pts[idx], u=ptUV[idx];
+        pos.push(p.x,baseE+h,p.y); uv.push(u[0],u[1]); col.push(j,j,j);
+      }
+    }
+    for(let i=0;i<pts.length-1;i++){   // 벽면: 지붕 중심 픽셀색 × 62% 명도
       const a=pts[i], c=pts[i+1];
-      pos.push(a.x,baseE,a.y);   col.push(wall[0],wall[1],wall[2]);
-      pos.push(c.x,baseE,c.y);   col.push(wall[0],wall[1],wall[2]);
-      pos.push(a.x,baseE+h,a.y); col.push(wall[0],wall[1],wall[2]);
-      pos.push(c.x,baseE,c.y);   col.push(wall[0],wall[1],wall[2]);
-      pos.push(c.x,baseE+h,c.y); col.push(wall[0],wall[1],wall[2]);
-      pos.push(a.x,baseE+h,a.y); col.push(wall[0],wall[1],wall[2]);
+      pos.push(a.x,baseE,a.y);   uv.push(cfx,cfy); col.push(.62*j,.62*j,.62*j);
+      pos.push(c.x,baseE,c.y);   uv.push(cfx,cfy); col.push(.62*j,.62*j,.62*j);
+      pos.push(a.x,baseE+h,a.y); uv.push(cfx,cfy); col.push(.62*j,.62*j,.62*j);
+      pos.push(c.x,baseE,c.y);   uv.push(cfx,cfy); col.push(.62*j,.62*j,.62*j);
+      pos.push(c.x,baseE+h,c.y); uv.push(cfx,cfy); col.push(.62*j,.62*j,.62*j);
+      pos.push(a.x,baseE+h,a.y); uv.push(cfx,cfy); col.push(.62*j,.62*j,.62*j);
     }
     made++;
   }
   if(!made) return null;
   const geo=new THREE.BufferGeometry();
   geo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(pos),3));
+  geo.setAttribute('uv',new THREE.BufferAttribute(new Float32Array(uv),2));
   geo.setAttribute('color',new THREE.BufferAttribute(new Float32Array(col),3));
   geo.computeVertexNormals();
-  const m=new THREE.Mesh(geo,new THREE.MeshStandardMaterial({color:0xffffff,vertexColors:true,roughness:.92,metalness:0,side:THREE.DoubleSide}));
+  const m=new THREE.Mesh(geo,new THREE.MeshStandardMaterial({
+    color:0xffffff, map:texture||null, vertexColors:true,
+    roughness:.92, metalness:0, side:THREE.DoubleSide
+  }));
   m.name='buildings'; m.userData.count=made;
   return m;
 }
@@ -1181,9 +1179,7 @@ glbBtn.onclick=async ()=>{
       glbMsg.textContent='건물 받는 중 (OSM Overpass)…';
       try{
         const ways=await fetchBuildings(b);
-        let texData=null;
-        try{ texData=tex.getContext('2d').getImageData(0,0,tex.width,tex.height); }catch{}
-        bldMesh=buildBuildingMesh(ways,hm,minE,vs,{Wm,Hm,midLat,b,texData,texW:tex.width,texH:tex.height});
+        bldMesh=buildBuildingMesh(ways,hm,minE,vs,{Wm,Hm,midLat,b,texture});
         if(bldMesh) glbMsg.textContent=`건물 ${bldMesh.userData.count}동 입체화 완료`;
         else glbMsg.textContent='이 영역에는 OSM 건물 데이터가 없습니다 — 지형만 내보냅니다';
       }catch(e){
