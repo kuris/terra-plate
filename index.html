@@ -972,21 +972,72 @@ async function buildTexture(b){
   return cv;
 }
 
-/* ── 건물: OSM footprint 가져와 지형 위에 입체화 ── */
+/* ── 건물: OSM footprint + 실제 지도 색상 샘플링으로 입체화 ── */
+const OVERPASS=[
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter'
+];
 async function fetchBuildings(b){
   const q=`[out:json][timeout:25];way["building"](${b.s},${b.w},${b.n},${b.e});out geom;`;
-  const res=await fetch('https://overpass-api.de/api/interpreter',{
-    method:'POST',
-    body:'data='+encodeURIComponent(q),
-    headers:{'Content-Type':'application/x-www-form-urlencoded'}
-  });
-  if(!res.ok) throw new Error('Overpass '+res.status);
-  return (await res.json()).elements||[];
+  let lastErr='';
+  for(const ep of OVERPASS){
+    for(const mode of ['post','get']){
+      try{
+        const res=await fetch(ep+(mode==='get'?'?data='+encodeURIComponent(q):''),{
+          method: mode==='post'?'POST':'GET',
+          headers: mode==='post'?{'Content-Type':'application/x-www-form-urlencoded'}:{},
+          body: mode==='post'?'data='+encodeURIComponent(q):undefined
+        });
+        if(!res.ok){ lastErr=ep.split('/')[2]+' '+res.status; continue; }
+        return (await res.json()).elements||[];
+      }catch(e){ lastErr=e.message; }
+    }
+  }
+  throw new Error(lastErr);
+}
+/* 용도별 폴백 팔레트 — 지도 색 샘플링 실패 시에만 사용 */
+const BLD_PALETTES=[
+  [/apartments/i,[0.56,0.64,0.72]],
+  [/house|residential|detached|semi|terrace|duplex|villa/i,[0.85,0.79,0.66]],
+  [/commercial|retail|office|hotel|mixed/i,[0.78,0.54,0.35]],
+  [/industrial|warehouse|garage|shed|barn|farm/i,[0.60,0.60,0.58]],
+  [/school|church|hospital|government|public|civic|university|temple/i,[0.79,0.64,0.15]]
+];
+function fallbackColor(tags){
+  const s=((tags.building||'yes')+' '+(tags['building:part']||''));
+  for(const [re,c] of BLD_PALETTES) if(re.test(s)) return c;
+  return [0.81,0.78,0.72];
+}
+function pointInRing(x,y,ring){
+  let inside=false;
+  for(let i=0,j=ring.length-1;i<ring.length;j=i++){
+    const xi=ring[i][0],yi=ring[i][1],xj=ring[j][0],yj=ring[j][1];
+    if((yi>y)!==(yj>y) && x<(xj-xi)*(y-yi)/(yj-yi)+xi) inside=!inside;
+  }
+  return inside;
+}
+/* 실제 지도 텍스처에서 건물 발밑 색을 격자 샘플링해 평균냄 */
+function sampleTexColor(texData,texW,texH,ringPx){
+  if(!texData) return null;
+  let minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
+  for(const p of ringPx){ if(p[0]<minX)minX=p[0]; if(p[0]>maxX)maxX=p[0]; if(p[1]<minY)minY=p[1]; if(p[1]>maxY)maxY=p[1]; }
+  const spanX=maxX-minX, spanY=maxY-minY;
+  if(spanX<2||spanY<2) return null;
+  const step=Math.max(3,Math.round(Math.min(spanX,spanY)/5));
+  let r=0,g=0,bb=0,n=0;
+  for(let py=minY;py<=maxY;py+=step) for(let px=minX;px<=maxX;px+=step){
+    if(!pointInRing(px,py,ringPx)) continue;
+    const k=((py|0)*texW+(px|0))*4;
+    if(k+3>=texData.data.length) continue;
+    r+=texData.data[k]; g+=texData.data[k+1]; bb+=texData.data[k+2]; n++;
+  }
+  if(!n) return null;
+  return [r/n/255, g/n/255, bb/n/255];
 }
 function buildBuildingMesh(ways,hm,minE,vs,ctx){
-  const {Wm,Hm,midLat,b}=ctx;
+  const {Wm,Hm,midLat,b,texData,texW,texH}=ctx;
   const mLng=111320*Math.cos(midLat*Math.PI/180), mLat=110540;
-  const pos=[];
+  const pos=[],col=[];
   let made=0;
   for(const el of ways){
     const g=el.geometry; if(!g||g.length<4) continue;
@@ -1003,28 +1054,49 @@ function buildBuildingMesh(ways,hm,minE,vs,ctx){
     for(let i=0;i<ring.length-1;i++){ cx+=ring[i][0]; cy+=ring[i][1]; }
     cx/=ring.length-1; cy/=ring.length-1;
     const baseE=(sampleElev(hm,(cx-b.w)/(b.e-b.w),(cy-b.n)/(b.s-b.n))-minE)*vs;
-    const pts=[];
+    const pts=[],ringPx=[];
     for(const p of ring){
       const x=(p[0]-b.w)*mLng-Wm/2, z=(p[1]-b.n)*mLat-Hm/2;
+      ringPx.push([(p[0]-b.w)/(b.e-b.w)*texW, (p[1]-b.n)/(b.s-b.n)*texH]);
       const last=pts[pts.length-1];
       if(!last||Math.abs(last.x-x)>.01||Math.abs(last.y-z)>.01) pts.push(new THREE.Vector2(x,z));
     }
     if(pts.length<3) continue;
     let tris=[];
     try{ tris=THREE.ShapeUtils.triangulateShape(new THREE.Shape(pts),[]); }catch{ continue; }
-    for(const t of tris){ for(const idx of t){ const p=pts[idx]; pos.push(p.x,baseE+h,p.y); } }   // 지붕
-    for(let i=0;i<pts.length-1;i++){                                                              // 벽면
+    // 실제 지도 색상 → 채도 +25%로 입체감, 실패 시 용도 팔레트
+    let base=sampleTexColor(texData,texW,texH,ringPx);
+    if(base){
+      const avg=(base[0]+base[1]+base[2])/3;
+      base=base.map(c=>Math.max(0,Math.min(1,avg+(c-avg)*1.25)));
+    }else{
+      base=fallbackColor(tags);
+    }
+    const j=0.94+Math.random()*0.12;                 // 건물별 미세 명도 변화
+    const roof=base.map(c=>c*j), wall=roof.map(c=>c*0.78);
+    for(const t of tris){                            // 지붕 (원색)
+      for(const idx of t){
+        const p=pts[idx];
+        pos.push(p.x,baseE+h,p.y); col.push(roof[0],roof[1],roof[2]);
+      }
+    }
+    for(let i=0;i<pts.length-1;i++){                 // 벽면 (22% 어둡게)
       const a=pts[i], c=pts[i+1];
-      pos.push(a.x,baseE,a.y,  c.x,baseE,c.y,  a.x,baseE+h,a.y);
-      pos.push(c.x,baseE,c.y,  c.x,baseE+h,c.y,  a.x,baseE+h,a.y);
+      pos.push(a.x,baseE,a.y);   col.push(wall[0],wall[1],wall[2]);
+      pos.push(c.x,baseE,c.y);   col.push(wall[0],wall[1],wall[2]);
+      pos.push(a.x,baseE+h,a.y); col.push(wall[0],wall[1],wall[2]);
+      pos.push(c.x,baseE,c.y);   col.push(wall[0],wall[1],wall[2]);
+      pos.push(c.x,baseE+h,c.y); col.push(wall[0],wall[1],wall[2]);
+      pos.push(a.x,baseE+h,a.y); col.push(wall[0],wall[1],wall[2]);
     }
     made++;
   }
   if(!made) return null;
   const geo=new THREE.BufferGeometry();
   geo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(pos),3));
+  geo.setAttribute('color',new THREE.BufferAttribute(new Float32Array(col),3));
   geo.computeVertexNormals();
-  const m=new THREE.Mesh(geo,new THREE.MeshStandardMaterial({color:0xcfc8b8,roughness:.92,metalness:0,side:THREE.DoubleSide}));
+  const m=new THREE.Mesh(geo,new THREE.MeshStandardMaterial({color:0xffffff,vertexColors:true,roughness:.92,metalness:0,side:THREE.DoubleSide}));
   m.name='buildings'; m.userData.count=made;
   return m;
 }
@@ -1095,7 +1167,9 @@ glbBtn.onclick=async ()=>{
       glbMsg.textContent='건물 받는 중 (OSM Overpass)…';
       try{
         const ways=await fetchBuildings(b);
-        bldMesh=buildBuildingMesh(ways,hm,minE,vs,{Wm,Hm,midLat,b});
+        let texData=null;
+        try{ texData=tex.getContext('2d').getImageData(0,0,tex.width,tex.height); }catch{}
+        bldMesh=buildBuildingMesh(ways,hm,minE,vs,{Wm,Hm,midLat,b,texData,texW:tex.width,texH:tex.height});
         if(bldMesh) glbMsg.textContent=`건물 ${bldMesh.userData.count}동 입체화 완료`;
         else glbMsg.textContent='이 영역에는 OSM 건물 데이터가 없습니다 — 지형만 내보냅니다';
       }catch(e){
