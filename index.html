@@ -339,6 +339,10 @@
         <input type="checkbox" id="terrainChk" checked>
         <label for="terrainChk">3D 지형 켜기</label>
       </div>
+      <div class="check-row">
+        <input type="checkbox" id="mapBldChk">
+        <label for="mapBldChk">지도에 3D 건물 표시 (OSM)</label>
+      </div>
     </div>
 
     <!-- 카메라 -->
@@ -1264,12 +1268,16 @@ function openPreview(objects,meta){
   pvClose.onclick=close;
   pv.onkeydown=e=>{ if(e.key==='Escape') close(); };
   pv.onclick=e=>{ if(e.target===pv) close(); };
+}
 
-  /* ── 저장한 GLB 다시 불러오기 ── */
-  loadGlbBtn.onclick=()=>glbFile.click();
-  glbFile.onchange=async ()=>{
-    const f=glbFile.files && glbFile.files[0];
-    glbFile.value='';
+/* ── 저장한 GLB 다시 불러오기 (페이지 로드 즉시 사용 가능) ── */
+{
+  const loadGlbBtnEl=document.getElementById('loadGlbBtn');
+  const glbFileEl=document.getElementById('glbFile');
+  loadGlbBtnEl.onclick=()=>glbFileEl.click();
+  glbFileEl.onchange=async ()=>{
+    const f=glbFileEl.files && glbFileEl.files[0];
+    glbFileEl.value='';
     if(!f) return;
     glbMsg.textContent='GLB 해석 중…';
     try{
@@ -1284,7 +1292,7 @@ function openPreview(objects,meta){
           }
         });
         if(!meshes){ glbMsg.textContent='이 파일에 메시가 없습니다.'; return; }
-        close();
+        if(pv.style.display==='flex'){ document.getElementById('pvClose').click(); }
         openPreview([gltf.scene],{loaded:f.name,meshes,tris:Math.round(tris)});
         glbMsg.textContent='로드 완료 — '+f.name;
       },(err)=>{
@@ -1294,26 +1302,60 @@ function openPreview(objects,meta){
       glbMsg.textContent='파일 읽기 실패: '+e.message;
     }
   };
+}
 
-  pvSave.onclick=()=>{
-    glbMsg.textContent='GLB 패키징 중…';
-    const exporter=new GLTFExporter();
-    exporter.parse(pvMesh,(res)=>{
-      const blob=new Blob([res],{type:'model/gltf-binary'});
-      const a=document.createElement('a');
-      const nm=(window.__placeName||'terrain').replace(/[\\/:*?"<>|]/g,'');
-      a.href=URL.createObjectURL(blob);
-      a.download=`terrain_${nm}_${Math.round(meta.Wm)}x${Math.round(meta.Hm)}m.glb`;
-      a.click(); URL.revokeObjectURL(a.href);
-      close();
-      glbMsg.textContent=`완료 · ${pvInfo}`;
-      const t=document.getElementById('toast');
-      t.textContent='GLB가 저장되었습니다 — Y축 위쪽 · 단위 m · 북쪽 = −Z';
-      t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),3000);
-    },(err)=>{
-      glbMsg.textContent='GLB 생성 실패: '+err;
-    },{binary:true});
-  };
+/* ── 지도에 3D 건물 표시 (fill-extrusion, 이동 시 자동 갱신) ── */
+{
+  const mapBldChk=document.getElementById('mapBldChk');
+  let on=false, busy=false, lastAt=0;
+  const BLD_COLORS=[['apartments','#8fa3b8'],['house','#d8c9a8'],['residential','#d8c9a8'],
+    ['commercial','#c88a5a'],['retail','#c88a5a'],['office','#c88a5a'],
+    ['industrial','#9a9a94'],['warehouse','#9a9a94'],
+    ['school','#c9a227'],['church','#c9a227'],['public','#c9a227']];
+  const bldHex=t=>{ const s=(t&&t.building)||'yes'; for(const [k,c] of BLD_COLORS) if(s.includes(k)) return c; return '#cfc8b8'; };
+  function capBox(bb){
+    let b={w:bb.getWest?bb.getWest():bb.w, e:bb.getEast?bb.getEast():bb.e, s:bb.getSouth?bb.getSouth():bb.s, n:bb.getNorth?bb.getNorth():bb.n};
+    const midLat=(b.n+b.s)/2;
+    const cw=10000/(111320*Math.cos(midLat*Math.PI/180)), ch=10000/110540;
+    if(b.e-b.w>cw){ const c=(b.w+b.e)/2; b.w=c-cw/2; b.e=c+cw/2; }
+    if(b.n-b.s>ch){ const c=(b.s+b.n)/2; b.s=c-ch/2; b.n=c+ch/2; }
+    return b;
+  }
+  async function loadMapBuildings(){
+    if(busy) return; busy=true;
+    try{
+      const b=capBox(selBounds||map.getBounds());
+      glbMsg.textContent='지도에 건물 받는 중 (OSM)…';
+      const ways=await fetchBuildings(b);
+      const feats=ways.filter(w=>w.geometry&&w.geometry.length>=3).map(w=>{
+        const tags=w.tags||{};
+        let h=parseFloat(tags.height||tags['building:height']);
+        if(!isFinite(h)&&tags['building:levels']) h=parseFloat(tags['building:levels'])*3.2;
+        if(!isFinite(h)||h<=0) h=4.5;
+        return {type:'Feature',properties:{h:Math.min(h,300),c:bldHex(tags)},
+                geometry:{type:'Polygon',coordinates:[w.geometry.map(p=>[p.lon,p.lat])]}};
+      }).slice(0,9000);
+      if(map.getSource('osmbld')) map.getSource('osmbld').setData({type:'FeatureCollection',features:feats});
+      else{
+        map.addSource('osmbld',{type:'geojson',data:{type:'FeatureCollection',features:feats}});
+        map.addLayer({id:'osmbld',type:'fill-extrusion',source:'osmbld',paint:{
+          'fill-extrusion-height':['get','h'],'fill-extrusion-base':0,
+          'fill-extrusion-color':['get','c'],'fill-extrusion-opacity':.93}});
+      }
+      glbMsg.textContent=`지도에 건물 ${feats.length}동 표시`;
+    }catch(e){
+      glbMsg.textContent='지도 건물 로드 실패 — '+e.message;
+    }finally{ busy=false; lastAt=Date.now(); }
+  }
+  mapBldChk.addEventListener('change',()=>{
+    on=mapBldChk.checked;
+    if(on) loadMapBuildings();
+    else if(map.getLayer('osmbld')){
+      map.removeLayer('osmbld'); map.removeSource('osmbld');
+      glbMsg.textContent='';
+    }
+  });
+  map.on('moveend',()=>{ if(on&&!busy&&Date.now()-lastAt>8000) loadMapBuildings(); });
 }
 </script>
 </body>
