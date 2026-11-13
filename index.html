@@ -1316,7 +1316,7 @@ function openPreview(objects,meta){
   function capBox(bb){
     let b={w:bb.getWest?bb.getWest():bb.w, e:bb.getEast?bb.getEast():bb.e, s:bb.getSouth?bb.getSouth():bb.s, n:bb.getNorth?bb.getNorth():bb.n};
     const midLat=(b.n+b.s)/2;
-    const cw=10000/(111320*Math.cos(midLat*Math.PI/180)), ch=10000/110540;
+    const cw=3000/(111320*Math.cos(midLat*Math.PI/180)), ch=3000/110540;
     if(b.e-b.w>cw){ const c=(b.w+b.e)/2; b.w=c-cw/2; b.e=c+cw/2; }
     if(b.n-b.s>ch){ const c=(b.s+b.n)/2; b.s=c-ch/2; b.n=c+ch/2; }
     return b;
@@ -1325,7 +1325,7 @@ function openPreview(objects,meta){
     if(busy) return; busy=true;
     try{
       const b=capBox(selBounds||map.getBounds());
-      glbMsg.textContent='지도에 건물 받는 중 (OSM)…';
+      toast('지도에 건물 받는 중 (OSM)…');
       const ways=await fetchBuildings(b);
       const feats=ways.filter(w=>w.geometry&&w.geometry.length>=3).map(w=>{
         const tags=w.tags||{};
@@ -1342,9 +1342,9 @@ function openPreview(objects,meta){
           'fill-extrusion-height':['get','h'],'fill-extrusion-base':0,
           'fill-extrusion-color':['get','c'],'fill-extrusion-opacity':.93}});
       }
-      glbMsg.textContent=`지도에 건물 ${feats.length}동 표시`;
+      toast(`지도에 건물 ${feats.length}동 표시`);
     }catch(e){
-      glbMsg.textContent='지도 건물 로드 실패 — '+e.message;
+      toast('지도 건물 로드 실패 — '+e.message); console.error('map buildings:',e);
     }finally{ busy=false; lastAt=Date.now(); }
   }
   mapBldChk.addEventListener('change',()=>{
@@ -1355,7 +1355,7 @@ function openPreview(objects,meta){
       glbMsg.textContent='';
     }
   });
-  map.on('moveend',()=>{ if(on&&!busy&&Date.now()-lastAt>8000) loadMapBuildings(); });
+  map.on('moveend',()=>{ if(on&&!busy&&Date.now()-lastAt>30000) loadMapBuildings(); });
 }
 </script>
 </body>
