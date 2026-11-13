@@ -849,6 +849,7 @@ function bboxFeature(b){
 }
 function drawSel(){
   map.getSource('selbox').setData(selBounds?{type:'FeatureCollection',features:[bboxFeature(selBounds)]}:{type:'FeatureCollection',features:[]});
+  if(typeof updateHandlePos==='function') updateHandlePos();   // 선택 직후에도 핸들 즉시 표시
 }
 function regionLabel(){
   if(!selBounds){ glbRegion.innerHTML='지도에서 <b style="color:var(--brass-bright)">Shift + 드래그</b>로 바로 선택 — 확대할수록 정밀해집니다'; return; }
