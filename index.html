@@ -939,7 +939,7 @@ async function buildHeights(b){
     const ox=(j.x-t.x0)*TS, oy=(j.y-t.y0)*TS;
     for(let py=0;py<TS;py++) for(let px=0;px<TS;px++){
       const k=(py*TS+px)*4;
-      elev[(oy+py)*W+ox+px]=(d[k]*256+d[k+1]+d[k+2]/256)-32768;
+      elev[(oy+py)*W+ox+px]=Math.max(-450,Math.min(9000,(d[k]*256+d[k+1]+d[k+2]/256)-32768)); // 손상 타일 이상치 클램프
     }
   }
   return {elev,W,H,tileInfo:t};
