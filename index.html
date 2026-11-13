@@ -418,6 +418,8 @@
 
         <button class="btn btn-primary export-btn" id="glbBtn" style="margin-top:12px">GLB로 내보내기 (색상·높이 포함) ↓</button>
         <div class="search-msg" id="glbMsg"></div>
+        <button class="btn" id="loadGlbBtn" style="width:100%;margin-top:8px">저장한 GLB 불러와서 보기</button>
+        <input type="file" id="glbFile" accept=".glb,model/gltf-binary" style="display:none">
       </div>
     </div>
   </div>
@@ -700,6 +702,7 @@ map.on('load',()=>{
 /* ═══════════════ GLB 내보내기 — 지형 메시 + 위성 텍스처 ═══════════════ */
 import * as THREE from 'three';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 const TERRARIUM='https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
@@ -1198,8 +1201,10 @@ let pvMesh=null, pvInfo='';
 
 function openPreview(objects,meta){
   pvMesh=objects;
-  pvInfo=`${meta.Wm.toFixed(0)}×${meta.Hm.toFixed(0)} m · 격자 ${meta.grid}×${meta.grid} · 고도 ${Math.round(meta.minE)}~${Math.round(meta.maxE)} m (수직 ${meta.vs}×) · 텍스처 ${meta.tw}px ${meta.src}`+
-    (meta.bld?` · 건물 ${meta.bld}동`:'');
+  pvInfo=meta.loaded
+    ? `${meta.loaded} · 메시 ${meta.meshes}개 · 삼각형 ${meta.tris.toLocaleString()}개 — 위치·방위는 파일 정의를 따릅니다`
+    : `${meta.Wm.toFixed(0)}×${meta.Hm.toFixed(0)} m · 격자 ${meta.grid}×${meta.grid} · 고도 ${Math.round(meta.minE)}~${Math.round(meta.maxE)} m (수직 ${meta.vs}×) · 텍스처 ${meta.tw}px ${meta.src}`+
+      (meta.bld?` · 건물 ${meta.bld}동`:'');
   pvMeta.textContent=pvInfo;
   pv.style.display='flex';
 
@@ -1213,17 +1218,22 @@ function openPreview(objects,meta){
   scene.background=new THREE.Color(0x0C211A);
   scene.add(new THREE.HemisphereLight(0xfff7e0,0x1a2a1e,1.4));
   const sun=new THREE.DirectionalLight(0xffffff,1.6);
-  const diag=Math.hypot(meta.Wm,meta.Hm);
-  sun.position.set(-diag*.6,diag*.8,diag*.4);
+  const box=new THREE.Box3();
+  for(const o of objects) box.expandByObject(o);
+  const ctr=box.getCenter(new THREE.Vector3());
+  const diag=Math.max(box.getSize(new THREE.Vector3()).length(),0.2);
+  sun.position.set(ctr.x-diag*.6,ctr.y+diag*.8,ctr.z+diag*.4);
   scene.add(sun);
   for(const o of objects) scene.add(o);
 
-  const cam=new THREE.PerspectiveCamera(55,w/h,Math.max(diag*.001,0.1),diag*10);
-  cam.position.set(diag*.55,diag*.5,diag*.75);
+  const cam=new THREE.PerspectiveCamera(55,w/h,Math.max(diag*.001,0.1),diag*20);
+  cam.position.set(ctr.x+diag*.55,ctr.y+diag*.5,ctr.z+diag*.75);
   const controls=new OrbitControls(cam,renderer.domElement);
+  controls.target.copy(ctr);
   controls.enableDamping=true;
   controls.autoRotate=true; controls.autoRotateSpeed=1.2;
   controls.maxPolarAngle=Math.PI*.49;
+  controls.update();
   controls.addEventListener('start',()=>controls.autoRotate=false);
 
   let raf;
@@ -1247,6 +1257,36 @@ function openPreview(objects,meta){
   pvClose.onclick=close;
   pv.onkeydown=e=>{ if(e.key==='Escape') close(); };
   pv.onclick=e=>{ if(e.target===pv) close(); };
+
+  /* ── 저장한 GLB 다시 불러오기 ── */
+  loadGlbBtn.onclick=()=>glbFile.click();
+  glbFile.onchange=async ()=>{
+    const f=glbFile.files && glbFile.files[0];
+    glbFile.value='';
+    if(!f) return;
+    glbMsg.textContent='GLB 해석 중…';
+    try{
+      const buf=await f.arrayBuffer();
+      new GLTFLoader().parse(buf,'',(gltf)=>{
+        let meshes=0, tris=0;
+        gltf.scene.traverse(o=>{
+          if(o.isMesh){
+            meshes++;
+            const g=o.geometry;
+            tris+= g.index ? g.index.count/3 : g.attributes.position.count/3;
+          }
+        });
+        if(!meshes){ glbMsg.textContent='이 파일에 메시가 없습니다.'; return; }
+        close();
+        openPreview([gltf.scene],{loaded:f.name,meshes,tris:Math.round(tris)});
+        glbMsg.textContent='로드 완료 — '+f.name;
+      },(err)=>{
+        glbMsg.textContent='GLB 해석 실패: '+err;
+      });
+    }catch(e){
+      glbMsg.textContent='파일 읽기 실패: '+e.message;
+    }
+  };
 
   pvSave.onclick=()=>{
     glbMsg.textContent='GLB 패키징 중…';
