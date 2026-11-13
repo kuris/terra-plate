@@ -411,6 +411,11 @@
           </select>
         </div>
 
+        <div class="check-row" style="margin-top:10px">
+          <input type="checkbox" id="bldChk">
+          <label for="bldChk">건물 포함 (OSM 높이 태그 기반 입체화)</label>
+        </div>
+
         <button class="btn btn-primary export-btn" id="glbBtn" style="margin-top:12px">GLB로 내보내기 (색상·높이 포함) ↓</button>
         <div class="search-msg" id="glbMsg"></div>
       </div>
@@ -967,6 +972,63 @@ async function buildTexture(b){
   return cv;
 }
 
+/* ── 건물: OSM footprint 가져와 지형 위에 입체화 ── */
+async function fetchBuildings(b){
+  const q=`[out:json][timeout:25];way["building"](${b.s},${b.w},${b.n},${b.e});out geom;`;
+  const res=await fetch('https://overpass-api.de/api/interpreter',{
+    method:'POST',
+    body:'data='+encodeURIComponent(q),
+    headers:{'Content-Type':'application/x-www-form-urlencoded'}
+  });
+  if(!res.ok) throw new Error('Overpass '+res.status);
+  return (await res.json()).elements||[];
+}
+function buildBuildingMesh(ways,hm,minE,vs,ctx){
+  const {Wm,Hm,midLat,b}=ctx;
+  const mLng=111320*Math.cos(midLat*Math.PI/180), mLat=110540;
+  const pos=[];
+  let made=0;
+  for(const el of ways){
+    const g=el.geometry; if(!g||g.length<4) continue;
+    const tags=el.tags||{};
+    let h=parseFloat(tags.height||tags['building:height']);
+    if(!isFinite(h)&&tags['building:levels']) h=parseFloat(tags['building:levels'])*3.2;
+    if(!isFinite(h)||h<=0) h=4.5;
+    h=Math.min(h,300);
+    const ring=g.map(p=>[p.lon,p.lat]);
+    const f0=ring[0], l0=ring[ring.length-1];
+    if(f0[0]!==l0[0]||f0[1]!==l0[1]) ring.push([f0[0],f0[1]]);
+    if(ring.length<4) continue;
+    let cx=0,cy=0;
+    for(let i=0;i<ring.length-1;i++){ cx+=ring[i][0]; cy+=ring[i][1]; }
+    cx/=ring.length-1; cy/=ring.length-1;
+    const baseE=(sampleElev(hm,(cx-b.w)/(b.e-b.w),(cy-b.n)/(b.s-b.n))-minE)*vs;
+    const pts=[];
+    for(const p of ring){
+      const x=(p[0]-b.w)*mLng-Wm/2, z=(p[1]-b.n)*mLat-Hm/2;
+      const last=pts[pts.length-1];
+      if(!last||Math.abs(last.x-x)>.01||Math.abs(last.y-z)>.01) pts.push(new THREE.Vector2(x,z));
+    }
+    if(pts.length<3) continue;
+    let tris=[];
+    try{ tris=THREE.ShapeUtils.triangulateShape(new THREE.Shape(pts),[]); }catch{ continue; }
+    for(const t of tris){ for(const idx of t){ const p=pts[idx]; pos.push(p.x,baseE+h,p.y); } }   // 지붕
+    for(let i=0;i<pts.length-1;i++){                                                              // 벽면
+      const a=pts[i], c=pts[i+1];
+      pos.push(a.x,baseE,a.y,  c.x,baseE,c.y,  a.x,baseE+h,a.y);
+      pos.push(c.x,baseE,c.y,  c.x,baseE+h,c.y,  a.x,baseE+h,a.y);
+    }
+    made++;
+  }
+  if(!made) return null;
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(pos),3));
+  geo.computeVertexNormals();
+  const m=new THREE.Mesh(geo,new THREE.MeshStandardMaterial({color:0xcfc8b8,roughness:.92,metalness:0,side:THREE.DoubleSide}));
+  m.name='buildings'; m.userData.count=made;
+  return m;
+}
+
 /* ── GLB 생성 ── */
 glbBtn.onclick=async ()=>{
   if(glbBtn.disabled) return;
@@ -1027,10 +1089,25 @@ glbBtn.onclick=async ()=>{
     const mesh=new THREE.Mesh(geo,mat);
     mesh.name='terrain';
 
+    /* ── 건물 (선택) ── */
+    let bldMesh=null;
+    if(document.getElementById('bldChk').checked){
+      glbMsg.textContent='건물 받는 중 (OSM Overpass)…';
+      try{
+        const ways=await fetchBuildings(b);
+        bldMesh=buildBuildingMesh(ways,hm,minE,vs,{Wm,Hm,midLat,b});
+        if(bldMesh) glbMsg.textContent=`건물 ${bldMesh.userData.count}동 입체화 완료`;
+        else glbMsg.textContent='이 영역에는 OSM 건물 데이터가 없습니다 — 지형만 내보냅니다';
+      }catch(e){
+        glbMsg.textContent='건물 로드 실패 — 지형만 내보냅니다 ('+e.message+')';
+      }
+    }
+
     /* ── 저장 전 3D 미리보기 ── */
-    openPreview(mesh,{
+    openPreview([mesh,bldMesh].filter(Boolean),{
       Wm,Hm,minE,maxE,grid:N,
-      src:tex.dataset.source, tw:tex.width, vs
+      src:tex.dataset.source, tw:tex.width, vs,
+      bld:bldMesh?bldMesh.userData.count:0
     });
   }catch(err){
     glbMsg.textContent='내보내기 실패: '+err.message;
@@ -1045,9 +1122,10 @@ const pv=document.getElementById('pv'), pvView=document.getElementById('pvView')
       pvClose=document.getElementById('pvClose');
 let pvMesh=null, pvInfo='';
 
-function openPreview(mesh,meta){
-  pvMesh=mesh;
-  pvInfo=`${meta.Wm.toFixed(0)}×${meta.Hm.toFixed(0)} m · 격자 ${meta.grid}×${meta.grid} · 고도 ${Math.round(meta.minE)}~${Math.round(meta.maxE)} m (수직 ${meta.vs}×) · 텍스처 ${meta.tw}px ${meta.src}`;
+function openPreview(objects,meta){
+  pvMesh=objects;
+  pvInfo=`${meta.Wm.toFixed(0)}×${meta.Hm.toFixed(0)} m · 격자 ${meta.grid}×${meta.grid} · 고도 ${Math.round(meta.minE)}~${Math.round(meta.maxE)} m (수직 ${meta.vs}×) · 텍스처 ${meta.tw}px ${meta.src}`+
+    (meta.bld?` · 건물 ${meta.bld}동`:'');
   pvMeta.textContent=pvInfo;
   pv.style.display='flex';
 
@@ -1064,7 +1142,7 @@ function openPreview(mesh,meta){
   const diag=Math.hypot(meta.Wm,meta.Hm);
   sun.position.set(-diag*.6,diag*.8,diag*.4);
   scene.add(sun);
-  scene.add(mesh);
+  for(const o of objects) scene.add(o);
 
   const cam=new THREE.PerspectiveCamera(55,w/h,Math.max(diag*.001,0.1),diag*10);
   cam.position.set(diag*.55,diag*.5,diag*.75);
@@ -1089,7 +1167,7 @@ function openPreview(mesh,meta){
     window.removeEventListener('resize',onResize);
     controls.dispose(); renderer.dispose();
     renderer.domElement.remove();
-    scene.remove(mesh);
+    for(const o of objects) scene.remove(o);
     pv.style.display='none'; pvMesh=null;
   };
   pvClose.onclick=close;
