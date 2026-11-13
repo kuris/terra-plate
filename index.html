@@ -514,7 +514,10 @@ const searchResults = document.getElementById('searchResults');
 function flyToHit(hit){
   const lat=parseFloat(hit.lat), lon=parseFloat(hit.lon);
   const parts=hit.display_name.split(',').map(s=>s.trim()).filter(Boolean);
-  map.flyTo({ center:[lon,lat], zoom:12, pitch:+document.getElementById('pitchR').value, duration:3200, essential:true });
+  // 시야 가로폭이 약 5km가 되는 줌으로 이동 — 기본 캡처 영역 감
+  const wpx=map.getCanvas().clientWidth||window.innerWidth||1440;
+  const zoom=Math.min(17,Math.max(3,Math.log2(156543.03392*Math.cos(lat*Math.PI/180)*wpx/5000)));
+  map.flyTo({ center:[lon,lat], zoom, pitch:+document.getElementById('pitchR').value, duration:3200, essential:true });
   setPlace(parts.length>1 ? `${parts[0]} ${parts[1]}` : parts[0]);
 }
 
@@ -987,14 +990,19 @@ async function fetchBuildings(b){
   for(const ep of OVERPASS){
     for(const mode of ['post','get']){
       try{
-        const res=await fetch(ep+(mode==='get'?'?data='+encodeURIComponent(q):''),{
-          method: mode==='post'?'POST':'GET',
-          headers: mode==='post'?{'Content-Type':'application/x-www-form-urlencoded'}:{},
-          body: mode==='post'?'data='+encodeURIComponent(q):undefined
-        });
-        if(!res.ok){ lastErr=ep.split('/')[2]+' '+res.status; continue; }
-        return (await res.json()).elements||[];
-      }catch(e){ lastErr=e.message; }
+        const ctl=new AbortController();
+        const timer=setTimeout(()=>ctl.abort(),30000);   // 30초 초과 시 포기하고 지형만 내보냄
+        try{
+          const res=await fetch(ep+(mode==='get'?'?data='+encodeURIComponent(q):''),{
+            method: mode==='post'?'POST':'GET',
+            headers: mode==='post'?{'Content-Type':'application/x-www-form-urlencoded'}:{},
+            body: mode==='post'?'data='+encodeURIComponent(q):undefined,
+            signal: ctl.signal
+          });
+          if(!res.ok){ lastErr=ep.split('/')[2]+' '+res.status; continue; }
+          return (await res.json()).elements||[];
+        }finally{ clearTimeout(timer); }
+      }catch(e){ lastErr=(e.name==='AbortError')?'응답 시간 초과':e.message; }
     }
   }
   throw new Error(lastErr);
